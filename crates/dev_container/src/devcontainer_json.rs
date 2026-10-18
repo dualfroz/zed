@@ -72,6 +72,12 @@ pub(crate) struct MountDefinition {
     pub(crate) target: String,
     #[serde(rename = "type")]
     pub(crate) mount_type: Option<String>,
+    #[serde(default, rename = "read_only", skip_serializing_if = "is_false")]
+    pub(crate) read_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Display for MountDefinition {
@@ -92,7 +98,11 @@ impl Display for MountDefinition {
         if let Some(source) = &self.source {
             write!(f, ",source={}", source)?;
         }
-        write!(f, ",target={},consistency=cached", self.target)
+        write!(f, ",target={}", self.target)?;
+        if self.read_only {
+            write!(f, ",readonly")?;
+        }
+        write!(f, ",consistency=cached")
     }
 }
 
@@ -508,6 +518,7 @@ where
             let mut source = None;
             let mut target = None;
             let mut mount_type = None;
+            let mut read_only = false;
 
             for part in s.split(',') {
                 let part = part.trim();
@@ -516,8 +527,11 @@ where
                         "source" => source = Some(value.trim().to_string()),
                         "target" => target = Some(value.trim().to_string()),
                         "type" => mount_type = Some(value.trim().to_string()),
+                        "readonly" | "ro" => read_only = !matches!(value.trim(), "false" | "0"),
                         _ => {} // Ignore unknown keys
                     }
+                } else if part == "readonly" || part == "ro" {
+                    read_only = true;
                 }
             }
 
@@ -528,6 +542,7 @@ where
                 source,
                 target,
                 mount_type,
+                read_only,
             }
         }
     };
@@ -561,6 +576,7 @@ where
                 let mut source = None;
                 let mut target = None;
                 let mut mount_type = None;
+                let mut read_only = false;
 
                 for part in s.split(',') {
                     let part = part.trim();
@@ -569,8 +585,11 @@ where
                             "source" => source = Some(value.trim().to_string()),
                             "target" => target = Some(value.trim().to_string()),
                             "type" => mount_type = Some(value.trim().to_string()),
+                            "readonly" | "ro" => read_only = !matches!(value.trim(), "false" | "0"),
                             _ => {} // Ignore unknown keys
                         }
+                    } else if part == "readonly" || part == "ro" {
+                        read_only = true;
                     }
                 }
 
@@ -582,6 +601,7 @@ where
                     source,
                     target,
                     mount_type,
+                    read_only,
                 });
             }
         }
@@ -1007,6 +1027,7 @@ mod test {
                     source: Some("/localfolder/app".to_string()),
                     target: "/workspaces/app".to_string(),
                     mount_type: Some("volume".to_string()),
+                    read_only: false,
                 }]),
                 run_args: Some(vec!["-c".to_string(), "some_command".to_string()]),
                 shutdown_action: Some(ShutdownAction::StopContainer),
@@ -1015,7 +1036,8 @@ mod test {
                 workspace_mount: Some(MountDefinition {
                     source: Some("/app".to_string()),
                     target: "/workspaces/app".to_string(),
-                    mount_type: Some("bind".to_string())
+                    mount_type: Some("bind".to_string()),
+                    read_only: false
                 }),
                 customizations: Some(ZedCustomizationsWrapper {
                     zed: ZedCustomization {
@@ -1473,11 +1495,13 @@ mod test {
                         source: Some("/localfolder/app".to_string()),
                         target: "/workspaces/app".to_string(),
                         mount_type: Some("volume".to_string()),
+                        read_only: false,
                     },
                     MountDefinition {
                         source: Some("dev-containers-cli-bashhistory".to_string()),
                         target: "/home/node/commandhistory".to_string(),
                         mount_type: None,
+                        read_only: false,
                     }
                 ]),
                 run_args: Some(vec!["-c".to_string(), "some_command".to_string()]),
@@ -1487,7 +1511,8 @@ mod test {
                 workspace_mount: Some(MountDefinition {
                     source: Some("/folder".to_string()),
                     target: "/workspace".to_string(),
-                    mount_type: Some("bind".to_string())
+                    mount_type: Some("bind".to_string()),
+                    read_only: false
                 }),
                 build: Some(ContainerBuild {
                     dockerfile: "DockerFile".to_string(),
@@ -1555,6 +1580,7 @@ mod test {
             source: Some("/home/user/project".to_string()),
             target: "/workspaces/project".to_string(),
             mount_type: None,
+            read_only: false,
         };
 
         let rendered = mount.to_string();
@@ -1571,6 +1597,7 @@ mod test {
             source: Some("\\\\server\\share\\project".to_string()),
             target: "/workspaces/project".to_string(),
             mount_type: None,
+            read_only: false,
         };
 
         let rendered = mount.to_string();
@@ -1587,6 +1614,7 @@ mod test {
             source: Some("C:\\Users\\mrg\\cli".to_string()),
             target: "/workspaces/cli".to_string(),
             mount_type: None,
+            read_only: false,
         };
 
         let rendered = mount.to_string();
@@ -1603,11 +1631,79 @@ mod test {
             source: None,
             target: "/tmp".to_string(),
             mount_type: Some("tmpfs".to_string()),
+            read_only: false,
         };
 
         let rendered = mount.to_string();
 
         assert_eq!(rendered, "type=tmpfs,target=/tmp,consistency=cached");
+    }
+
+    #[test]
+    fn should_keep_readonly_option_from_mount_strings() {
+        let given_json = r#"
+            {
+                "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+                "workspaceMount": "source=/app,target=/workspaces/app,type=bind,readonly",
+                "mounts": [
+                    "source=/host/a,target=/a,type=bind,readonly",
+                    "source=/host/b,target=/b,type=bind,ro",
+                    "source=/host/c,target=/c,type=bind,readonly=true",
+                    "source=/host/d,target=/d,type=bind,ro=0",
+                    "source=/host/e,target=/e,type=bind"
+                ]
+            }
+        "#;
+
+        let devcontainer = deserialize_devcontainer_json(given_json).expect("ok");
+
+        assert_eq!(
+            devcontainer.workspace_mount.map(|mount| mount.to_string()),
+            Some(
+                "type=bind,source=/app,target=/workspaces/app,readonly,consistency=cached"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            devcontainer
+                .mounts
+                .unwrap_or_default()
+                .iter()
+                .map(|mount| mount.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "type=bind,source=/host/a,target=/a,readonly,consistency=cached",
+                "type=bind,source=/host/b,target=/b,readonly,consistency=cached",
+                "type=bind,source=/host/c,target=/c,readonly,consistency=cached",
+                "type=bind,source=/host/d,target=/d,consistency=cached",
+                "type=bind,source=/host/e,target=/e,consistency=cached",
+            ]
+        );
+    }
+
+    #[test]
+    fn should_serialize_readonly_mount_as_compose_read_only() {
+        let devcontainer = deserialize_devcontainer_json(
+            r#"{
+                "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+                "mounts": [
+                    "source=/host/a,target=/a,type=bind,readonly",
+                    "source=/host/b,target=/b,type=bind"
+                ]
+            }"#,
+        )
+        .expect("ok");
+
+        let serialized = serde_json_lenient::to_value(devcontainer.mounts.unwrap_or_default())
+            .expect("mounts serialize");
+
+        assert_eq!(
+            serialized,
+            serde_json_lenient::json!([
+                {"source": "/host/a", "target": "/a", "type": "bind", "read_only": true},
+                {"source": "/host/b", "target": "/b", "type": "bind"}
+            ])
+        );
     }
 
     #[test]

@@ -1428,6 +1428,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${{PATH:-\3}}/g' /etc/profile || true
                 source: v.source.clone(),
                 target: v.target.clone(),
                 mount_type: v.mount_type.clone(),
+                read_only: v.read_only,
             })
             .collect();
 
@@ -2153,6 +2154,7 @@ RUN sed -i -E 's/((^|\s)PATH=)([^\$]*)$/\1\${PATH:-\3}/g' /etc/profile || true
                 project_directory_name.display()
             ),
             mount_type: None,
+            read_only: false,
         })
     }
 
@@ -3324,6 +3326,7 @@ fn mount_definition_from_metadata(value: &serde_json_lenient::Value) -> Option<M
                 source,
                 target,
                 mount_type,
+                read_only: false,
             })
         }
         _ => None,
@@ -3334,15 +3337,22 @@ fn parse_mount_definition_string(value: &str) -> Option<MountDefinition> {
     let mut source = None;
     let mut target = None;
     let mut mount_type = None;
+    let mut read_only = false;
 
     for part in value.split(',') {
-        let Some((key, value)) = part.trim().split_once('=') else {
+        let part = part.trim();
+        if part == "readonly" || part == "ro" {
+            read_only = true;
+            continue;
+        }
+        let Some((key, value)) = part.split_once('=') else {
             continue;
         };
         match key.trim() {
             "source" | "src" => source = Some(value.trim().to_string()),
             "target" | "dst" | "destination" => target = Some(value.trim().to_string()),
             "type" => mount_type = Some(value.trim().to_string()),
+            "readonly" | "ro" => read_only = !matches!(value.trim(), "false" | "0"),
             _ => {}
         }
     }
@@ -3351,6 +3361,7 @@ fn parse_mount_definition_string(value: &str) -> Option<MountDefinition> {
         source,
         target,
         mount_type,
+        read_only,
     })
 }
 
@@ -3879,6 +3890,75 @@ mod test {
     }
 
     #[gpui::test]
+    async fn should_pass_readonly_mounts_to_docker_run(cx: &mut TestAppContext) {
+        let (_, mut devcontainer_manifest) = init_default_devcontainer_manifest(
+            cx,
+            r#"{
+                "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+                "mounts": [
+                    "source=/host/config,target=/config,type=bind,readonly",
+                    "source=/host/cache,target=/cache,type=bind"
+                ]
+            }"#,
+        )
+        .await
+        .unwrap();
+        devcontainer_manifest.parse_nonremote_vars().unwrap();
+
+        let metadata = serde_json_lenient::from_str(
+            r#"[
+                {
+                    "mounts": [
+                        "source=/host/metadata,target=/metadata,type=bind,ro"
+                    ]
+                }
+            ]"#,
+        )
+        .unwrap();
+        let base_image = DockerInspect {
+            id: "mcr.microsoft.com/devcontainers/base:ubuntu".to_string(),
+            config: DockerInspectConfig {
+                labels: DockerConfigLabels {
+                    metadata: Some(metadata),
+                },
+                image_user: None,
+                env: Vec::new(),
+            },
+            mounts: None,
+            state: None,
+        };
+
+        let resources = devcontainer_manifest
+            .build_merged_resources(base_image, "mcr.microsoft.com/devcontainers/base:ubuntu")
+            .unwrap();
+        let docker_run_command = devcontainer_manifest
+            .create_docker_run_command(resources)
+            .unwrap();
+        let mount_args: Vec<&OsStr> = docker_run_command
+            .get_args()
+            .skip_while(|arg| *arg != OsStr::new("--mount"))
+            .skip(2)
+            .take(6)
+            .collect();
+
+        assert_eq!(
+            mount_args,
+            vec![
+                OsStr::new("--mount"),
+                OsStr::new(
+                    "type=bind,source=/host/metadata,target=/metadata,readonly,consistency=cached"
+                ),
+                OsStr::new("--mount"),
+                OsStr::new(
+                    "type=bind,source=/host/config,target=/config,readonly,consistency=cached"
+                ),
+                OsStr::new("--mount"),
+                OsStr::new("type=bind,source=/host/cache,target=/cache,consistency=cached"),
+            ]
+        );
+    }
+
+    #[gpui::test]
     async fn should_substitute_nonremote_variables_in_image_metadata(cx: &mut TestAppContext) {
         let (_, mut devcontainer_manifest) = init_default_devcontainer_manifest(
             cx,
@@ -3936,6 +4016,7 @@ mod test {
                 )),
                 target: "/var/lib/docker".to_string(),
                 mount_type: Some("volume".to_string()),
+                read_only: false,
             }]
         );
         assert_eq!(
@@ -7504,6 +7585,7 @@ RUN echo $RUBY_VERSION2
                                     source: Some("../..".to_string()),
                                     target: "/workspaces".to_string(),
                                     mount_type: Some("bind".to_string()),
+                                    read_only: false,
                                 }],
                                 command: vec!["sleep".to_string(), "infinity".to_string()],
                                 ..Default::default()
@@ -7523,6 +7605,7 @@ RUN echo $RUBY_VERSION2
                                     source: Some("../..".to_string()),
                                     target: "/workspaces".to_string(),
                                     mount_type: Some("bind".to_string()),
+                                    read_only: false,
                                 }],
                                 network_mode: Some("service:db".to_string()),
                                 ..Default::default()
@@ -7536,6 +7619,7 @@ RUN echo $RUBY_VERSION2
                                     source: Some("postgres-data".to_string()),
                                     target: "/var/lib/postgresql/data".to_string(),
                                     mount_type: Some("volume".to_string()),
+                                    read_only: false,
                                 }],
                                 env_file: Some(vec![".env".to_string()]),
                                 ..Default::default()

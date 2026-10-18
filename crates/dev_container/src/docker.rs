@@ -680,6 +680,7 @@ fn parse_compose_volume_string(s: &str) -> Option<MountDefinition> {
             source: Some(source.to_string()),
             target: target.to_string(),
             mount_type: None,
+            read_only: false,
         })
     } else {
         // No colon at all — anonymous volume with only a target path
@@ -690,6 +691,7 @@ fn parse_compose_volume_string(s: &str) -> Option<MountDefinition> {
             source: None,
             target: s.to_string(),
             mount_type: None,
+            read_only: false,
         })
     }
 }
@@ -1153,6 +1155,7 @@ mod test {
                         ),
                         volumes: vec![MountDefinition {
                             mount_type: Some("bind".to_string()),
+                            read_only: false,
                             source: Some("/path/to".to_string()),
                             target: "/workspaces".to_string(),
                         }],
@@ -1190,6 +1193,7 @@ mod test {
                         image: Some("postgres:14.1".to_string()),
                         volumes: vec![MountDefinition {
                             mount_type: Some("volume".to_string()),
+                            read_only: false,
                             source: Some("postgres-data".to_string()),
                             target: "/var/lib/postgresql/data".to_string(),
                         }],
